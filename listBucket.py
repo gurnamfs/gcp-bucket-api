@@ -1,23 +1,42 @@
 from fastapi import HTTPException
 import os
 import requests
+import vertexai
+from google.oauth2 import service_account
 import google.auth
+from vertexai.generative_models import GenerativeModel
 from google.auth.transport.requests import Request
 from google.auth import load_credentials_from_dict
 from typing import List
 from dotenv import load_dotenv
 import tempfile
 import json
+import re
+from datetime import datetime
+from google.cloud import aiplatform
 
 
 load_dotenv()
 
 credentials_info = json.loads(os.getenv("API_KEY"))
-# PROJECT_ID = credentials_info['PROJECT_ID']
 
+def neutralize_json_blocks(text):
+    json_pattern = re.compile(r'```json(.*?)```', re.DOTALL)
+    def process_json(match):
+        json_string = match.group(1).strip()  
+        try:
+            
+            json_data = json.loads(json_string)
+            return str(json_data).replace('{', '').replace('}', '')
+        except json.JSONDecodeError:
+            return json_string 
+        
+   
+    return json_pattern.sub(process_json, text)
 
-# with open('path_to_credentials.json', 'r') as file:
-#     credentials_info = json.load(file)
+def get_credentials():
+    credentials_info = json.loads(os.getenv("API_KEY"))
+    return service_account.Credentials.from_service_account_info(credentials_info)
 
 def get_access_token():
     scopes = ["https://www.googleapis.com/auth/cloud-platform"]
@@ -102,3 +121,38 @@ def upload_files_to_gcs(bucket_name: str, object_names: List[str], file_paths: L
             raise HTTPException(status_code=response.status_code, detail=f"{response.status_code}: Failed to upload file '{object_name}': {response.text}")
 
     return {"message": "Files uploaded successfully."}
+
+def process_text(input_text: str):
+    input_text = neutralize_json_blocks(input_text)
+
+    credentials = get_credentials()
+    vertexai.init(project="firstsource-vertex", location="us-central1", credentials=credentials)
+
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    prompt = f"""
+    Your task is to provide formatting of input {input_text} based on Output Format:
+
+    Output Format:
+    "formatted_output": [
+        {{
+          "Step": "Step description",
+          "Reason": "",
+          "Action": "",
+          "api_name": "creative name based on action",
+          "execution_time": "{current_time}",
+          "input_variable": key:value based on action execution,
+          "status": "compliant"
+        }}
+      ]
+      
+    Instruction:
+    - Do not provide any additional text other than JSON
+    - Use {current_time} for the execution time
+    - Provide the input variable name:value as string
+    """
+
+    model = GenerativeModel("gemini-1.5-flash-001")
+    response = model.generate_content([prompt])
+
+    formatted_response = response.text.replace('*', '').replace('#', '')
+    return formatted_response
